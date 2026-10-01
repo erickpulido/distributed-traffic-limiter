@@ -19,40 +19,34 @@ local data = redis.call("HMGET", key, "tokens", "last_refill")
 local current_tokens = tonumber(data[1])
 local last_refill    = tonumber(data[2])
 
--- 2. Si el bucket no existe en memoria, inicializarlo lleno
-if current_tokens == nil then
+if current_tokens == nil or last_refill == nil then
     current_tokens = capacity
     last_refill    = now
 else
-    -- 3. Calcular tokens acumulados por tiempo transcurrido
     local delta = math.max(0, now - last_refill)
-    local tokens_to_add = delta * refill_rate
-    current_tokens = math.min(capacity, current_tokens + tokens_to_add)
+    current_tokens = math.min(capacity, current_tokens + (delta * refill_rate))
     last_refill = now
 end
 
--- 4. Evaluar si hay suficientes tokens para la petición
+-- 2. Evaluar y descontar
 local allowed = 0
 local retry_after = 0
 
 if current_tokens >= cost then
-    -- APROBADO: Restar el costo y permitir el paso
     allowed = 1
     current_tokens = current_tokens - cost
 else
-    -- DENEGADO: Calcular segundos exactos de espera para el próximo intento
     allowed = 0
-    local missing_tokens = cost - current_tokens
-    retry_after = missing_tokens / refill_rate
+    local missing = cost - current_tokens
+    -- Redondeo hacia arriba con ceil para dar segundos enteros útiles,
+    -- o cálculo con un piso mínimo garantizado de espera.
+    retry_after = math.max(1.0, math.ceil(missing / refill_rate))
 end
 
--- 5. Persistir estado en Redis
+-- 3. Guardar estado
 redis.call("HMSET", key, "tokens", current_tokens, "last_refill", last_refill)
 
--- 6. Calcular TTL para liberar memoria RAM cuando no haya actividad
--- TTL = tiempo que tarda en llenarse por completo desde cero + 60s de margen
 local ttl = math.ceil(capacity / refill_rate) + 60
 redis.call("EXPIRE", key, ttl)
 
--- 7. Retornar array al cliente: [allowed (0|1), tokens_restantes, retry_after, capacidad]
-return { allowed, current_tokens, retry_after, capacity }
+return { allowed, math.floor(current_tokens), retry_after, math.floor(capacity) }
