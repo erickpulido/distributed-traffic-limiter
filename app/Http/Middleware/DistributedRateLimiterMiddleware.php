@@ -7,6 +7,7 @@ namespace App\Http\Middleware;
 use App\Infrastructure\Traffic\Contracts\ConsumerResolverInterface;
 use App\Infrastructure\Traffic\FailMode;
 use App\Infrastructure\Traffic\TokenBucketLimiter;
+use App\Jobs\RecordTrafficAnomalyJob;
 use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -47,7 +48,19 @@ class DistributedRateLimiterMiddleware
             failMode: $mode
         );
 
+        // 1. Detección de Bloqueo por Exceso de Tráfico
         if (! $result->isAllowed) {
+            RecordTrafficAnomalyJob::dispatch(
+                eventType: 'rate_limit_exceeded',
+                consumerId: $consumerId,
+                route: $routeSignature,
+                metadata: [
+                    'ip' => $request->ip(),
+                    'cost' => $cost,
+                    'retry_after' => (int) $result->retryAfterSeconds,
+                ]
+            );
+
             return new JsonResponse(
                 data: [
                     'error' => 'Too Many Requests',
@@ -62,6 +75,16 @@ class DistributedRateLimiterMiddleware
                     'RateLimit-Remaining' => '0',
                     'RateLimit-Reset' => (string) (int) $result->retryAfterSeconds,
                 ]
+            );
+        }
+
+        // 2. Detección de Activación de Fallback (Circuit Breaker)
+        if ($result->fallbackTriggered) {
+            RecordTrafficAnomalyJob::dispatch(
+                eventType: 'circuit_breaker_activated',
+                consumerId: $consumerId,
+                route: $routeSignature,
+                metadata: ['ip' => $request->ip()]
             );
         }
 
